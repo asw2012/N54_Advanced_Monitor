@@ -158,12 +158,15 @@ class DemoTransport {
     const w = (n) => { n = Math.max(0, Math.min(65535, Math.round(n))); return hex2(n >> 8) + hex2(n & 255); };
     const SUP = new Set([0x05, 0x0b, 0x0c, 0x0d, 0x11, 0x20, 0x23, 0x33, 0x40, 0x60, 0x70, 0x72]);
     const bitmap = (base) => { let v = 0; for (let i = 1; i <= 32; i++) if (SUP.has(base + i)) v |= 1 << (32 - i); return (v >>> 0).toString(16).toUpperCase().padStart(8, '0'); };
+    const p29 = /p29/.test(location.search);
     if (cmd === 'ATH1') this.h1 = true; else if (cmd === 'ATH0') this.h1 = false;
     if (cmd.startsWith('ATSH')) this.hdr = cmd.slice(4);
+    const bcast = !this.hdr || this.hdr === (p29 ? 'DB33F1' : '7DF');
+    const toDme = bcast || (!/nodme/.test(location.search) && this.hdr === (p29 ? 'DA10F1' : '7E0'));
     if (cmd === 'ATZ' || cmd === 'ATWS') r = '\r\rELM327 v1.5';
     else if (cmd === 'ATI') r = 'ELM327 v1.5';
     else if (cmd === 'ATRV') r = (13.9 + Math.random() * 0.2).toFixed(1) + 'V';
-    else if (cmd === 'ATDPN') r = 'A6';
+    else if (cmd === 'ATDPN') r = p29 ? 'A7' : 'A6';
     else if (cmd === 'ATDP') r = 'AUTO, ISO 15765-4 (CAN 11/500)';
     else if (cmd.startsWith('AT')) r = 'OK';
     else if (/^01(00|20|40|60)$/.test(cmd)) r = '41' + cmd.slice(2) + bitmap(parseInt(cmd.slice(2), 16));
@@ -175,9 +178,10 @@ class DemoTransport {
     else if (cmd === '0170') r = '4170' + '03' + w(s.tgt * 32) + w(s.map * 32) + '0000' + '0000' + '00';
     else if (cmd === '0172') r = '4172' + '0F' + b(s.wgc * 2.55) + b(s.wga * 2.55) + b(s.wgc * 2.55) + b((s.wga + 1) * 2.55);
     else r = 'NO DATA';
+    if (/^41/.test(r) && !toDme) r = 'NO DATA';
     if (/^41/.test(r)) {
-      const tcu = cmd === '0100' && this.hdr !== '7E0' ? (this.h1 ? '7E906' : '') + '410088180000' : null;
-      if (this.h1) r = '7E8' + hex2(r.length / 2) + r;
+      const tcu = cmd === '0100' && bcast ? (this.h1 ? (p29 ? '18DAF11806' : '7E906') : '') + '410088180000' : null;
+      if (this.h1) r = (p29 ? '18DAF110' : '7E8') + hex2(r.length / 2) + r;
       if (tcu) r = tcu + '\r' + r; // transmission answers first, like a real E9x
     }
     setTimeout(() => this.onData(r + '\r\r>'), 15 + Math.random() * 15);
@@ -307,22 +311,26 @@ async function initElm() {
     if (attempt === 1) await elm.send('ATSP6').catch(() => {}); // E9x OBD = ISO 15765-4 CAN 11-bit 500k
   }
   if (!bytesAfter(r, '4100')) throw new Error('ECU did not answer (' + r.join(' ') + '). Ignition on? Adapter fully seated?');
-  // Several modules (DME, transmission, …) answer functional 7DF requests. Find them and talk to the DME (7E8) only.
-  STD_HDR = { header: '7DF', cea: '', cra: '' }; curHdr = null;
+  // Several modules (DME, transmission, …) answer the broadcast. Find the DME and address it directly,
+  // for 11-bit (7E0 → 7E8) or 29-bit (18DA10F1 → 18DAF110) CAN. Never leave a header in place unless it's verified.
+  const dpn = (await elm.send('ATDPN').catch(() => [''])).join('').replace(/^A/i, '').trim();
+  const is29 = ['7', '9'].includes(dpn);
+  const BCAST = is29 ? { header: 'DB33F1', cp: '18', cea: '', cra: '' } : { header: '7DF', cea: '', cra: '' };
+  const DME = is29 ? { header: 'DA10F1', cp: '18', cea: '', cra: '18DAF110' } : { header: '7E0', cea: '', cra: '7E8' };
+  STD_HDR = BCAST_HDR = BCAST; curHdr = hdrKey(BCAST); ceaOn = false; // the adapter is on its default broadcast header right now
   await elm.send('ATH1').catch(() => {});
   const rh = await elm.send('0100', 3000).catch(() => []);
   await elm.send('ATH0').catch(() => {});
-  ecus = [...new Set(rh.map((l) => l.replace(/\s/g, '').toUpperCase()).filter((l) => /^7E[8-F]/.test(l)).map((l) => l.slice(0, 3)))];
+  log('Protocol ' + (dpn || '?') + (is29 ? ' (29-bit)' : ' (11-bit)') + '. Header test raw: ' + rh.join(' | '));
+  const heads = rh.map((l) => l.replace(/\s/g, '').toUpperCase()).filter((l) => /4100/.test(l));
+  ecus = [...new Set(heads.map((l) => (is29 ? l.slice(0, 8) : l.slice(0, 3))).filter((h) => /^(7E[8-F]|18DAF1[0-9A-F]{2})$/.test(h)))];
+  // Probe the DME's physical address and keep it only if it actually answers.
+  await setHeader(DME);
+  const probe = await elm.send('0100', 3000).catch(() => []);
+  const probe2 = bytesAfter(probe, '4100') ? await elm.send('010C', 2000).catch(() => []) : [];
+  if (bytesAfter(probe2, '410C')) { STD_HDR = DME; log('Using DME at ' + DME.header + ' → ' + DME.cra); }
+  else { await setHeader(BCAST); log('DME probe failed (' + probe.join(' ') + '), staying on broadcast'); }
   log('Modules answering: ' + (ecus.join(', ') || 'unknown'));
-  // Header parsing can fail on some adapters, so also probe the DME's physical address directly.
-  if (!ecus.includes('7E8')) {
-    await setHeader({ header: '7E0', cea: '', cra: '7E8' });
-    const probe = await elm.send('0100', 3000).catch(() => []);
-    if (bytesAfter(probe, '4100')) ecus.push('7E8*');
-    else await setHeader(STD_HDR);
-  }
-  if (ecus.some((e) => e.startsWith('7E8'))) { STD_HDR = { header: '7E0', cea: '', cra: '7E8' }; await setHeader(STD_HDR); }
-  log('Header test raw: ' + rh.join(' | '));
   $('#infoProto').textContent = (await elm.send('ATDP').catch(() => ['?'])).join(' ');
   $('#infoVolt').textContent = (await elm.send('ATRV').catch(() => ['?'])).join(' ');
   sup = new Set();
@@ -341,7 +349,7 @@ async function initElm() {
   const want = Object.keys(PIDS).map(Number);
   const has = want.filter((p) => sup.has(p)).map((p) => hex2(p) + ' ' + PIDS[p].n);
   const miss = want.filter((p) => !sup.has(p)).map((p) => hex2(p) + ' ' + PIDS[p].n);
-  $('#supportInfo').textContent = 'Modules: ' + (ecus.join(', ') || '?') + (STD_HDR.cra ? ' (using DME 7E8)' : '') + '. ECU supports: ' + (has.join(', ') || 'none') + '. Not reported: ' + (miss.join(', ') || 'none') + '.';
+  $('#supportInfo').textContent = 'Modules: ' + (ecus.join(', ') || '?') + (STD_HDR.cra ? ' (using DME ' + STD_HDR.cra + ')' : ' (broadcast)') + '. ECU supports: ' + (has.join(', ') || 'none') + '. Not reported: ' + (miss.join(', ') || 'none') + '.';
   log('Supported PIDs: ' + [...sup].map(hex2).join(' '));
   if (!sup.has(0x23) && !sup.has(0x59) && !customFor('rail')) toast('ECU does not report a standard rail-pressure PID. Add a BMW DME channel in Menu → BMW DME.', 7000);
   setStatus('Connected · ' + tr.name, 'on');
@@ -361,17 +369,19 @@ async function readPid(pid) {
 }
 
 // BMW DME custom channels: switch headers, query, restore.
-let curHdr = null;
+let curHdr = null, ceaOn = false;
+const hdrKey = (c) => [c.cp, c.header, c.cea, c.cra].join('|');
 async function setHeader(c) {
-  const key = [c.header, c.cea, c.cra].join('|');
+  const key = hdrKey(c);
   if (key === curHdr) return;
+  if (c.cp) await elm.send('ATCP' + c.cp).catch(() => {});
   if (c.header) await elm.send('ATSH' + c.header).catch(() => {});
-  await elm.send(c.cea ? 'ATCEA' + c.cea : 'ATCEA').catch(() => {});
+  if (c.cea || ceaOn) { await elm.send(c.cea ? 'ATCEA' + c.cea : 'ATCEA').catch(() => {}); ceaOn = !!c.cea; }
   await elm.send(c.cra ? 'ATCRA' + c.cra : 'ATCRA').catch(() => {});
   if (c.fcsh) { await elm.send('ATFCSH' + c.fcsh).catch(() => {}); await elm.send('ATFCSD' + (c.fcsd || '300000')).catch(() => {}); await elm.send('ATFCSM1').catch(() => {}); }
   curHdr = key;
 }
-let STD_HDR = { header: '7DF', cea: '', cra: '' };
+let STD_HDR = { header: '7DF', cea: '', cra: '' }, BCAST_HDR = STD_HDR;
 let ecus = [];
 const compiled = new Map();
 async function readCustom(c) {
@@ -403,7 +413,6 @@ async function readCustom(c) {
 
 async function pollLoop() {
   let n = 0, cycles = 0, tHz = performance.now();
-  curHdr = null;
   while (running && elm) {
     const custom = (S.custom || []).filter((c) => c.request && (c._fail || 0) < 8);
     const ct = new Set(custom.map((c) => c.target));
@@ -416,11 +425,16 @@ async function pollLoop() {
     if (!ct.has('coolant')) slow.push(0x05);
     if (usable(0x33)) slow.push(0x33);
 
-    if (custom.length || STD_HDR.cra) await setHeader(STD_HDR);
+    await setHeader(STD_HDR); // no-op unless a custom channel changed it
     for (const p of fast) { if (!running) return; await readPid(p); }
     if (n % 12 === 0) for (const p of slow) { if (!running) return; await readPid(p); }
     if (custom.length) for (const c of custom) { if (!running) return; await readCustom(c); }
 
+    // Safety net: if the directly-addressed DME stops answering RPM, go back to broadcast.
+    if ((fails[0x0c] || 0) >= 4 && STD_HDR !== BCAST_HDR) {
+      log('No answers on ' + STD_HDR.header + ', reverting to broadcast', 'err');
+      STD_HDR = BCAST_HDR; fails[0x0c] = 0; curHdr = null;
+    }
     sample();
     n++; cycles++;
     const now = performance.now();
