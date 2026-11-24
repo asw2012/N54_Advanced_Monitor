@@ -2,6 +2,7 @@ name: Build Android APK
 on:
   push:
     branches: [main, ccr-7400caf0-5ajluy]
+    paths-ignore: ['README.md', '**/*.md']
   workflow_dispatch:
 permissions:
   contents: write
@@ -26,7 +27,13 @@ jobs:
       - name: Publish release "apk-latest"
         env: { GH_TOKEN: "${{ github.token }}" }
         run: |
-          gh release delete apk-latest --cleanup-tag -y || true
-          gh release create apk-latest n54-monitor.apk --target "$GITHUB_SHA" --latest \
-            --title "N54 Monitor APK (build $GITHUB_RUN_NUMBER)" \
-            --notes "Built from ${GITHUB_SHA::7} on $GITHUB_REF_NAME. Download n54-monitor.apk on your Android phone and open it to install."
+          # Replace the asset in place so the download link never disappears mid-download.
+          if gh release view apk-latest >/dev/null 2>&1; then
+            gh release upload apk-latest n54-monitor.apk --clobber
+            gh release edit apk-latest --title "N54 Monitor APK (build $GITHUB_RUN_NUMBER)" \
+              --notes "Built from ${GITHUB_SHA::7} on $GITHUB_REF_NAME. Download n54-monitor.apk on your Android phone and open it to install."
+          else
+            gh release create apk-latest n54-monitor.apk --target "$GITHUB_SHA" --latest \
+              --title "N54 Monitor APK (build $GITHUB_RUN_NUMBER)" \
+              --notes "Built from ${GITHUB_SHA::7} on $GITHUB_REF_NAME. Download n54-monitor.apk on your Android phone and open it to install."
+          fi
