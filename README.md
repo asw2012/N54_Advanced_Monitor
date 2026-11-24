@@ -8,6 +8,16 @@ Displays: **RPM** (with shift lights), **boost** (with DME target if reported), 
 **coolant temperature**, and **wastegate duty** for both banks (actual + commanded). Also: peak/min hold,
 warnings (low rail pressure, overheating, overboost), CSV logging, a raw ELM327 terminal, and a Demo mode.
 
+## Android APK
+Download **[n54-monitor.apk](https://github.com/asw2012/N54_Advanced_Monitor/releases/download/apk-latest/n54-monitor.apk)**
+on the phone, open it and allow "install unknown apps" for your browser. Every push rebuilds it
+(`.github/workflows/android.yml`) and replaces the `apk-latest` release. Updates install over the old version.
+The APK uses native Bluetooth LE (Capacitor + `@capacitor-community/bluetooth-le`), so it doesn't depend
+on browser support. It's signed with a fixed, non-secret debug key (`android/app/n54-debug.keystore`).
+That's fine for sideloading, but you'd need a proper key for the Play Store.
+
+Local build: `npm ci && npm run sync && (cd android && ./gradlew assembleDebug)`.
+
 ## What you need
 | | |
 |---|---|
