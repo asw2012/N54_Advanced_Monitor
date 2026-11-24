@@ -302,7 +302,7 @@ async function initElm() {
   try { await elm.send('ATZ', 3000); } catch { await elm.send('ATWS', 3000).catch(() => {}); }
   const ver = await elm.send('ATI').catch(() => []);
   $('#infoElm').textContent = ver.join(' ') || '?';
-  for (const c of ['ATE0', 'ATL0', 'ATS0', 'ATH0', 'ATAT1', 'ATSP0']) await elm.send(c).catch(() => {});
+  for (const c of ['ATE0', 'ATL0', 'ATS0', 'ATH0', 'ATAT2', 'ATSP0']) await elm.send(c).catch(() => {});
   setStatus('Searching for ECU…', 'busy');
   let r = [];
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -317,19 +317,15 @@ async function initElm() {
   const is29 = ['7', '9'].includes(dpn);
   const BCAST = is29 ? { header: 'DB33F1', cp: '18', cea: '', cra: '' } : { header: '7DF', cea: '', cra: '' };
   const DME = is29 ? { header: 'DA10F1', cp: '18', cea: '', cra: '18DAF110' } : { header: '7E0', cea: '', cra: '7E8' };
-  STD_HDR = BCAST_HDR = BCAST; curHdr = hdrKey(BCAST); ceaOn = false; // the adapter is on its default broadcast header right now
+  STD_HDR = BCAST_HDR = BCAST; curHdr = hdrKey(BCAST); ceaOn = false; craOn = false; // the adapter is on its default broadcast header right now
   await elm.send('ATH1').catch(() => {});
   const rh = await elm.send('0100', 3000).catch(() => []);
   await elm.send('ATH0').catch(() => {});
   log('Protocol ' + (dpn || '?') + (is29 ? ' (29-bit)' : ' (11-bit)') + '. Header test raw: ' + rh.join(' | '));
   const heads = rh.map((l) => l.replace(/\s/g, '').toUpperCase()).filter((l) => /4100/.test(l));
   ecus = [...new Set(heads.map((l) => (is29 ? l.slice(0, 8) : l.slice(0, 3))).filter((h) => /^(7E[8-F]|18DAF1[0-9A-F]{2})$/.test(h)))];
-  // Probe the DME's physical address and keep it only if it actually answers.
-  await setHeader(DME);
-  const probe = await elm.send('0100', 3000).catch(() => []);
-  const probe2 = bytesAfter(probe, '4100') ? await elm.send('010C', 2000).catch(() => []) : [];
-  if (bytesAfter(probe2, '410C')) { STD_HDR = DME; log('Using DME at ' + DME.header + ' → ' + DME.cra); }
-  else { await setHeader(BCAST); log('DME probe failed (' + probe.join(' ') + '), staying on broadcast'); }
+  // Leave the adapter's addressing alone for standard PIDs: changing headers/filters on some adapters
+  // (e.g. vLinker) cannot be undone reliably and silences every request. Union of all modules' answers is used.
   log('Modules answering: ' + (ecus.join(', ') || 'unknown'));
   $('#infoProto').textContent = (await elm.send('ATDP').catch(() => ['?'])).join(' ');
   $('#infoVolt').textContent = (await elm.send('ATRV').catch(() => ['?'])).join(' ');
@@ -369,7 +365,7 @@ async function readPid(pid) {
 }
 
 // BMW DME custom channels: switch headers, query, restore.
-let curHdr = null, ceaOn = false;
+let curHdr = null, ceaOn = false, craOn = false;
 const hdrKey = (c) => [c.cp, c.header, c.cea, c.cra].join('|');
 async function setHeader(c) {
   const key = hdrKey(c);
@@ -377,7 +373,7 @@ async function setHeader(c) {
   if (c.cp) await elm.send('ATCP' + c.cp).catch(() => {});
   if (c.header) await elm.send('ATSH' + c.header).catch(() => {});
   if (c.cea || ceaOn) { await elm.send(c.cea ? 'ATCEA' + c.cea : 'ATCEA').catch(() => {}); ceaOn = !!c.cea; }
-  await elm.send(c.cra ? 'ATCRA' + c.cra : 'ATCRA').catch(() => {});
+  if (c.cra || craOn) { await elm.send(c.cra ? 'ATCRA' + c.cra : 'ATAR').catch(() => {}); craOn = !!c.cra; }
   if (c.fcsh) { await elm.send('ATFCSH' + c.fcsh).catch(() => {}); await elm.send('ATFCSD' + (c.fcsd || '300000')).catch(() => {}); await elm.send('ATFCSM1').catch(() => {}); }
   curHdr = key;
 }
@@ -425,7 +421,7 @@ async function pollLoop() {
     if (!ct.has('coolant')) slow.push(0x05);
     if (usable(0x33)) slow.push(0x33);
 
-    await setHeader(STD_HDR); // no-op unless a custom channel changed it
+    if (curHdr !== hdrKey(STD_HDR) && curHdr !== null) await setHeader(STD_HDR);
     for (const p of fast) { if (!running) return; await readPid(p); }
     if (n % 12 === 0) for (const p of slow) { if (!running) return; await readPid(p); }
     if (custom.length) for (const c of custom) { if (!running) return; await readCustom(c); }
@@ -633,7 +629,7 @@ $('#btnSaveCustom').onclick = () => {
       if (/X/i.test(c.request)) throw new Error('Replace the XXXX placeholder in "' + c.request + '" with a real identifier');
       new Function('A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'bytes', 'return (' + c.formula + ');');
     }
-    S.custom = arr; saveS(); curHdr = null; $('#customErr').textContent = 'Saved ' + arr.length + ' channel(s).';
+    S.custom = arr; saveS(); $('#customErr').textContent = 'Saved ' + arr.length + ' channel(s).';
   } catch (e) { $('#customErr').textContent = 'Error: ' + e.message; }
 };
 $('#termForm').onsubmit = async (e) => {
@@ -643,7 +639,7 @@ $('#termForm').onsubmit = async (e) => {
   if (!elm) { log('Not connected', 'err'); return; }
   log('> ' + cmd, 'tx');
   try { const r = await elm.send(cmd, 5000); log(r.join('\n') || '(empty)'); } catch (err) { log(err.message, 'err'); }
-  curHdr = null; // the user may have changed headers; force restore
+  // terminal commands may change headers; the user is responsible for those
 };
 document.addEventListener('visibilitychange', async () => {
   if (document.visibilityState === 'visible' && running && !wakeLock) await getWake();
