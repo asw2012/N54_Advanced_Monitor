@@ -314,7 +314,15 @@ async function initElm() {
   await elm.send('ATH0').catch(() => {});
   ecus = [...new Set(rh.map((l) => l.replace(/\s/g, '').toUpperCase()).filter((l) => /^7E[8-F]/.test(l)).map((l) => l.slice(0, 3)))];
   log('Modules answering: ' + (ecus.join(', ') || 'unknown'));
-  if (ecus.includes('7E8')) { STD_HDR = { header: '7E0', cea: '', cra: '7E8' }; await setHeader(STD_HDR); }
+  // Header parsing can fail on some adapters, so also probe the DME's physical address directly.
+  if (!ecus.includes('7E8')) {
+    await setHeader({ header: '7E0', cea: '', cra: '7E8' });
+    const probe = await elm.send('0100', 3000).catch(() => []);
+    if (bytesAfter(probe, '4100')) ecus.push('7E8*');
+    else await setHeader(STD_HDR);
+  }
+  if (ecus.some((e) => e.startsWith('7E8'))) { STD_HDR = { header: '7E0', cea: '', cra: '7E8' }; await setHeader(STD_HDR); }
+  log('Header test raw: ' + rh.join(' | '));
   $('#infoProto').textContent = (await elm.send('ATDP').catch(() => ['?'])).join(' ');
   $('#infoVolt').textContent = (await elm.send('ATRV').catch(() => ['?'])).join(' ');
   sup = new Set();
