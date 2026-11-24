@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#0b0d10">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>N54 Monitor</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header class="bar">
+  <div class="status"><span id="dot" class="dot"></span><span id="statusText">Disconnected</span></div>
+  <div class="actions">
+    <button id="btnConnect" class="primary">Connect</button>
+    <button id="btnDemo">Demo</button>
+    <button id="btnMenu" aria-label="Menu">☰</button>
+  </div>
+</header>
+
+<main id="dash">
+  <section class="tile rpm" id="tRpm">
+    <div class="shift" id="shift"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+    <svg viewBox="0 0 200 130" class="gauge" id="gRpm"></svg>
+    <div class="readout big"><span id="vRpm">--</span><small>RPM</small></div>
+    <div class="peak">peak <span id="pRpm">--</span></div>
+  </section>
+
+  <section class="tile" id="tBoost">
+    <h2>Boost</h2>
+    <svg viewBox="0 0 200 130" class="gauge" id="gBoost"></svg>
+    <div class="readout"><span id="vBoost">--</span><small id="uBoost">psi</small></div>
+    <div class="sub">target <span id="vBoostT">--</span> · peak <span id="pBoost">--</span></div>
+  </section>
+
+  <section class="tile" id="tRail">
+    <h2>HPFP rail</h2>
+    <svg viewBox="0 0 200 130" class="gauge" id="gRail"></svg>
+    <div class="readout"><span id="vRail">--</span><small id="uRail">bar</small></div>
+    <div class="sub">min <span id="mRail">--</span> · src <span id="sRail">--</span></div>
+  </section>
+
+  <section class="tile" id="tCool">
+    <h2>Coolant</h2>
+    <div class="readout"><span id="vCool">--</span><small id="uCool">°F</small></div>
+    <div class="hbar"><i id="bCool"></i></div>
+    <div class="sub">peak <span id="pCool">--</span></div>
+  </section>
+
+  <section class="tile" id="tWg">
+    <h2>Wastegates</h2>
+    <div class="wg"><label>Bank 1</label><div class="hbar"><i id="bWg1"></i><b id="bWg1c"></b></div><span id="vWg1">--</span></div>
+    <div class="wg"><label>Bank 2</label><div class="hbar"><i id="bWg2"></i><b id="bWg2c"></b></div><span id="vWg2">--</span></div>
+    <div class="sub">bar = actual · tick = commanded · src <span id="sWg">--</span></div>
+  </section>
+</main>
+
+<footer class="bar foot">
+  <button id="btnRec">● Rec</button>
+  <button id="btnPeaks">Reset peaks</button>
+  <span class="hz"><span id="hz">0.0</span> Hz</span>
+</footer>
+
+<div id="drawer" class="drawer" hidden>
+  <div class="panel">
+    <div class="phead"><h3>Menu</h3><button id="btnClose">✕</button></div>
+    <nav class="tabs">
+      <button data-tab="set" class="on">Settings</button>
+      <button data-tab="dme">BMW DME</button>
+      <button data-tab="term">Terminal</button>
+      <button data-tab="info">Info</button>
+    </nav>
+
+    <div class="tab" id="tab-set">
+      <label>Boost unit <select id="sBoostU"><option value="psi">psi</option><option value="bar">bar</option><option value="kpa">kPa</option></select></label>
+      <label>Rail unit <select id="sRailU"><option value="bar">bar</option><option value="psi">psi</option><option value="mpa">MPa</option></select></label>
+      <label>Temp unit <select id="sTempU"><option value="F">°F</option><option value="C">°C</option></select></label>
+      <label>Shift light (rpm) <input id="sShift" type="number" inputmode="numeric"></label>
+      <label>Warn: coolant above (°C) <input id="sWCool" type="number" inputmode="numeric"></label>
+      <label>Warn: rail below (bar, engine running) <input id="sWRail" type="number" inputmode="numeric"></label>
+      <label>Warn: boost above (psi) <input id="sWBoost" type="number" inputmode="decimal"></label>
+      <label class="chk"><input id="sForce" type="checkbox"> Ignore ECU "supported PID" list (try everything)</label>
+      <button id="btnSaveSet" class="primary">Save</button>
+      <p class="note" id="supportInfo"></p>
+    </div>
+
+    <div class="tab" id="tab-dme" hidden>
+      <p class="note">Custom channels override the standard OBD value for a gauge. Use them to read the MSD80/MSD81 DME directly
+      (e.g. header <code>6F1</code>, CAN extended address <code>12</code>, receive <code>612</code>).
+      The app never ships guessed DME identifiers. Add ones you have verified for your DME software. Each entry:
+      <code>target</code> (rpm | boost | boostTarget | rail | coolant | wg1 | wg2), <code>header</code>, <code>cea</code>, <code>cra</code>,
+      <code>request</code> (hex, e.g. <code>22XXXX</code>), <code>formula</code> using response bytes <code>A,B,C…</code> (after the echoed request).
+      Output units: boost/rail in kPa (absolute for boost), coolant °C, wastegate %.</p>
+      <textarea id="customJson" spellcheck="false" rows="12"></textarea>
+      <div class="row"><button id="btnSaveCustom" class="primary">Save channels</button><button id="btnTemplate">Insert template</button></div>
+      <p class="note" id="customErr"></p>
+    </div>
+
+    <div class="tab" id="tab-term" hidden>
+      <div id="termLog" class="term"></div>
+      <form id="termForm" class="row"><input id="termIn" autocapitalize="characters" autocomplete="off" placeholder="ATI, 0100, 22…"><button class="primary">Send</button></form>
+      <label class="chk"><input id="termVerbose" type="checkbox"> Log all traffic</label>
+    </div>
+
+    <div class="tab" id="tab-info" hidden>
+      <p><b>Adapter:</b> <span id="infoAdapter">–</span><br><b>ELM:</b> <span id="infoElm">–</span><br><b>Protocol:</b> <span id="infoProto">–</span><br><b>VBatt:</b> <span id="infoVolt">–</span></p>
+      <p class="note">Requires a <b>Bluetooth LE</b> ELM327-compatible adapter (OBDLink CX, Vgate iCar Pro BLE, Veepeak BLE+…).
+      Android: Chrome. iPhone: use the Bluefy browser (Safari has no Web Bluetooth).<br>
+      Do not operate the app while driving. Mount the phone and let a passenger interact with it.</p>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast" hidden></div>
+<script src="app.js"></script>
+</body>
+</html>
