@@ -1,0 +1,11 @@
+{
+  "appId": "com.n54monitor.app",
+  "appName": "N54 Monitor",
+  "webDir": "www",
+  "android": { "backgroundColor": "#0b0d10" },
+  "plugins": {
+    "BluetoothLe": {
+      "displayStrings": { "scanning": "Looking for OBD adapters…", "cancel": "Cancel", "availableDevices": "Pick your OBD adapter", "noDeviceFound": "No Bluetooth LE device found" }
+    }
+  }
+}

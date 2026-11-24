@@ -85,6 +85,43 @@ class BleTransport {
   disconnect() { try { this.dev?.gatt?.disconnect(); } catch {} }
 }
 
+
+// ---------------------------------------------------------------- Native BLE transport (Android APK build)
+const NATIVE = window.N54Native && window.N54Native.Capacitor.isNativePlatform() ? window.N54Native : null;
+class NativeBleTransport {
+  constructor() { this.onData = () => {}; this.onClose = () => {}; this.dec = new TextDecoder(); this.enc = new TextEncoder(); }
+  async connect() {
+    const { BleClient } = NATIVE;
+    await BleClient.initialize();
+    if (!(await BleClient.isEnabled())) { try { await BleClient.requestEnable(); } catch {} }
+    const dev = await BleClient.requestDevice({});
+    this.id = dev.deviceId;
+    setStatus('Connecting to ' + (dev.name || dev.deviceId) + '…', 'busy');
+    await BleClient.connect(this.id, () => this.onClose(), { timeout: 15000 });
+    const services = await BleClient.getServices(this.id);
+    let best = null;
+    const rank = (svc) => (/^0000(180[0-9a-f]|18[0-9a-f]{2})-/.test(svc.uuid) && !/^000018f0/.test(svc.uuid) ? 1 : 0); // skip standard GATT/GAP-type services first
+    for (const svc of [...services].sort((a, b) => rank(a) - rank(b))) {
+      const n = svc.characteristics.find((c) => c.properties.notify || c.properties.indicate);
+      const w = svc.characteristics.find((c) => c.properties.writeWithoutResponse || c.properties.write);
+      if (n && w) { best = { svc: svc.uuid, n: n.uuid, w: w.uuid, noResp: !!w.properties.writeWithoutResponse }; break; }
+    }
+    if (!best) throw new Error('No serial (notify+write) characteristic found. Services: ' + services.map((s) => s.uuid.slice(4, 8)).join(','));
+    this.b = best;
+    await BleClient.startNotifications(this.id, best.svc, best.n, (dv) => this.onData(this.dec.decode(dv)));
+    this.name = (dev.name || 'BLE adapter') + ' [' + best.svc.slice(4, 8) + ']';
+  }
+  async write(str) {
+    const { BleClient } = NATIVE; const bytes = this.enc.encode(str);
+    for (let i = 0; i < bytes.length; i += 20) {
+      const dv = new DataView(bytes.slice(i, i + 20).buffer);
+      if (this.b.noResp) await BleClient.writeWithoutResponse(this.id, this.b.svc, this.b.w, dv);
+      else await BleClient.write(this.id, this.b.svc, this.b.w, dv);
+    }
+  }
+  disconnect() { if (this.id) NATIVE.BleClient.disconnect(this.id).catch(() => {}); }
+}
+
 // ---------------------------------------------------------------- Demo transport (simulated N54 + ELM327)
 class DemoTransport {
   constructor() { this.onData = () => {}; this.onClose = () => {}; this.name = 'Demo simulator'; this.t0 = performance.now(); this.cool = 40; }
@@ -207,7 +244,7 @@ let tr = null, elm = null, running = false, wakeLock = null;
 
 async function start(demo) {
   if (running || tr) { stop(); return; }
-  tr = demo ? new DemoTransport() : new BleTransport();
+  tr = demo ? new DemoTransport() : NATIVE ? new NativeBleTransport() : new BleTransport();
   try {
     setStatus(demo ? 'Starting demo…' : 'Pick your OBD adapter…', 'busy');
     await tr.connect();
@@ -222,7 +259,7 @@ async function start(demo) {
     pollLoop();
   } catch (e) {
     log('ERROR ' + e.message, 'err');
-    if (e.name !== 'NotFoundError') toast(e.message, 6000);
+    if (e.name !== 'NotFoundError' && !/cancel/i.test(e.message)) toast(e.message, 6000);
     stop();
   }
 }
@@ -365,15 +402,25 @@ function sample() {
   if (rec) rec.push([((performance.now() - rec.t0) / 1000).toFixed(3), V.rpm?.toFixed(0), b?.toFixed(1), boostTKpa()?.toFixed(1),
     V.rail?.toFixed(0), V.cool?.toFixed(0), V.wg1?.toFixed(1), V.wg2?.toFixed(1), V.wg1c?.toFixed(1), V.wg2c?.toFixed(1)].map((x) => x ?? '').join(','));
 }
+async function saveNative(fname, csv, n) {
+  const { Filesystem, Directory, Encoding, Share } = NATIVE;
+  try {
+    const r = await Filesystem.writeFile({ path: fname, data: csv, directory: Directory.Cache, encoding: Encoding.UTF8 });
+    await Share.share({ title: fname, files: [r.uri], dialogTitle: 'Save or send log' });
+  } catch (e) { if (!/cancel/i.test(e.message)) toast('Could not share log: ' + e.message, 6000); return; }
+  toast(n + ' samples saved');
+}
 function toggleRec() {
   if (!rec) { rec = []; rec.t0 = performance.now(); rec.start = new Date(); $('#btnRec').classList.add('rec'); $('#btnRec').textContent = '■ Stop'; return; }
   const rows = rec; rec = null;
   $('#btnRec').classList.remove('rec'); $('#btnRec').textContent = '● Rec';
   if (!rows.length) return toast('Nothing recorded');
   const csv = 'time_s,rpm,boost_kpa,boost_target_kpa,rail_kpa,coolant_c,wg1_pct,wg2_pct,wg1_cmd_pct,wg2_cmd_pct\n' + rows.join('\n');
+  const fname = 'n54_log_' + rows.start.toISOString().replace(/[:.]/g, '-').slice(0, 19) + '.csv';
+  if (NATIVE) { saveNative(fname, csv, rows.length); return; }
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
-  a.download = 'n54_log_' + rows.start.toISOString().replace(/[:.]/g, '-').slice(0, 19) + '.csv';
+  a.download = fname;
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 5000);
   toast(rows.length + ' samples saved');
@@ -551,5 +598,5 @@ document.addEventListener('visibilitychange', async () => {
 
 buildGauges();
 requestAnimationFrame(render);
-if (!navigator.bluetooth) setStatus('No Web Bluetooth in this browser (Demo only)');
-if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
+if (!navigator.bluetooth && !NATIVE) setStatus('No Web Bluetooth in this browser (Demo only)');
+if (!NATIVE && 'serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});

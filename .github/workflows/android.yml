@@ -1,0 +1,32 @@
+name: Build Android APK
+on:
+  push:
+    branches: [main, ccr-7400caf0-5ajluy]
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency: { group: apk, cancel-in-progress: true }
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: 21 }
+      - run: npm ci
+      - run: npm run sync
+      - name: Gradle build
+        working-directory: android
+        run: chmod +x gradlew && ./gradlew assembleDebug --no-daemon --stacktrace
+      - run: cp android/app/build/outputs/apk/debug/app-debug.apk n54-monitor.apk
+      - uses: actions/upload-artifact@v4
+        with: { name: n54-monitor-apk, path: n54-monitor.apk }
+      - name: Publish release "apk-latest"
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          gh release delete apk-latest --cleanup-tag -y || true
+          gh release create apk-latest n54-monitor.apk --target "$GITHUB_SHA" --latest \
+            --title "N54 Monitor APK (build $GITHUB_RUN_NUMBER)" \
+            --notes "Built from ${GITHUB_SHA::7} on $GITHUB_REF_NAME. Download n54-monitor.apk on your Android phone and open it to install."
