@@ -19,6 +19,14 @@ const V = { rpm: null, map: null, baro: 101.3, boostT: null, rail: null, cool: n
   wg1: null, wg2: null, wg1c: null, wg2c: null };
 const SRC = { rail: '–', wg: '–', boost: '–' };
 const PK = {};
+const V0 = { ...V };
+function resetLive() {
+  Object.assign(V, V0); Object.assign(SRC, { rail: '–', wg: '–', boost: '–' });
+  for (const k in smooth) delete smooth[k];
+  for (const k in fails) delete fails[k];
+  for (const c of S.custom || []) c._fail = 0;
+  resetPeaks();
+}
 const resetPeaks = () => Object.assign(PK, { rpm: 0, boost: -99, cool: -99, railMin: Infinity });
 resetPeaks();
 
@@ -150,6 +158,8 @@ class DemoTransport {
     const w = (n) => { n = Math.max(0, Math.min(65535, Math.round(n))); return hex2(n >> 8) + hex2(n & 255); };
     const SUP = new Set([0x05, 0x0b, 0x0c, 0x0d, 0x11, 0x20, 0x23, 0x33, 0x40, 0x60, 0x70, 0x72]);
     const bitmap = (base) => { let v = 0; for (let i = 1; i <= 32; i++) if (SUP.has(base + i)) v |= 1 << (32 - i); return (v >>> 0).toString(16).toUpperCase().padStart(8, '0'); };
+    if (cmd === 'ATH1') this.h1 = true; else if (cmd === 'ATH0') this.h1 = false;
+    if (cmd.startsWith('ATSH')) this.hdr = cmd.slice(4);
     if (cmd === 'ATZ' || cmd === 'ATWS') r = '\r\rELM327 v1.5';
     else if (cmd === 'ATI') r = 'ELM327 v1.5';
     else if (cmd === 'ATRV') r = (13.9 + Math.random() * 0.2).toFixed(1) + 'V';
@@ -165,6 +175,11 @@ class DemoTransport {
     else if (cmd === '0170') r = '4170' + '03' + w(s.tgt * 32) + w(s.map * 32) + '0000' + '0000' + '00';
     else if (cmd === '0172') r = '4172' + '0F' + b(s.wgc * 2.55) + b(s.wga * 2.55) + b(s.wgc * 2.55) + b((s.wga + 1) * 2.55);
     else r = 'NO DATA';
+    if (/^41/.test(r)) {
+      const tcu = cmd === '0100' && this.hdr !== '7E0' ? (this.h1 ? '7E906' : '') + '410088180000' : null;
+      if (this.h1) r = '7E8' + hex2(r.length / 2) + r;
+      if (tcu) r = tcu + '\r' + r; // transmission answers first, like a real E9x
+    }
     setTimeout(() => this.onData(r + '\r\r>'), 15 + Math.random() * 15);
   }
 }
@@ -244,6 +259,7 @@ let tr = null, elm = null, running = false, wakeLock = null;
 
 async function start(demo) {
   if (running || tr) { stop(); return; }
+  resetLive();
   tr = demo ? new DemoTransport() : NATIVE ? new NativeBleTransport() : new BleTransport();
   try {
     setStatus(demo ? 'Starting demo…' : 'Pick your OBD adapter…', 'busy');
@@ -291,19 +307,33 @@ async function initElm() {
     if (attempt === 1) await elm.send('ATSP6').catch(() => {}); // E9x OBD = ISO 15765-4 CAN 11-bit 500k
   }
   if (!bytesAfter(r, '4100')) throw new Error('ECU did not answer (' + r.join(' ') + '). Ignition on? Adapter fully seated?');
+  // Several modules (DME, transmission, …) answer functional 7DF requests. Find them and talk to the DME (7E8) only.
+  STD_HDR = { header: '7DF', cea: '', cra: '' }; curHdr = null;
+  await elm.send('ATH1').catch(() => {});
+  const rh = await elm.send('0100', 3000).catch(() => []);
+  await elm.send('ATH0').catch(() => {});
+  ecus = [...new Set(rh.map((l) => l.replace(/\s/g, '').toUpperCase()).filter((l) => /^7E[8-F]/.test(l)).map((l) => l.slice(0, 3)))];
+  log('Modules answering: ' + (ecus.join(', ') || 'unknown'));
+  if (ecus.includes('7E8')) { STD_HDR = { header: '7E0', cea: '', cra: '7E8' }; await setHeader(STD_HDR); }
   $('#infoProto').textContent = (await elm.send('ATDP').catch(() => ['?'])).join(' ');
   $('#infoVolt').textContent = (await elm.send('ATRV').catch(() => ['?'])).join(' ');
   sup = new Set();
   for (const base of [0x00, 0x20, 0x40, 0x60, 0x80]) {
     if (base && !sup.has(base)) break;
-    const d = bytesAfter(await elm.send('01' + hex2(base), 3000).catch(() => []), '41' + hex2(base));
-    if (!d || d.length < 4) break;
-    for (let i = 0; i < 32; i++) if (d[i >> 3] & (0x80 >> (i & 7))) sup.add(base + i + 1);
+    const lines = await elm.send('01' + hex2(base), 3000).catch(() => []);
+    let any = false;
+    for (const l of lines) { // OR together every module's answer (only the DME answers once 7E0 is selected)
+      const d = bytesAfter([l], '41' + hex2(base));
+      if (!d || d.length < 4) continue;
+      any = true;
+      for (let i = 0; i < 32; i++) if (d[i >> 3] & (0x80 >> (i & 7))) sup.add(base + i + 1);
+    }
+    if (!any) break;
   }
   const want = Object.keys(PIDS).map(Number);
   const has = want.filter((p) => sup.has(p)).map((p) => hex2(p) + ' ' + PIDS[p].n);
   const miss = want.filter((p) => !sup.has(p)).map((p) => hex2(p) + ' ' + PIDS[p].n);
-  $('#supportInfo').textContent = 'ECU supports: ' + (has.join(', ') || 'none') + '. Not reported: ' + (miss.join(', ') || 'none') + '.';
+  $('#supportInfo').textContent = 'Modules: ' + (ecus.join(', ') || '?') + (STD_HDR.cra ? ' (using DME 7E8)' : '') + '. ECU supports: ' + (has.join(', ') || 'none') + '. Not reported: ' + (miss.join(', ') || 'none') + '.';
   log('Supported PIDs: ' + [...sup].map(hex2).join(' '));
   if (!sup.has(0x23) && !sup.has(0x59) && !customFor('rail')) toast('ECU does not report a standard rail-pressure PID. Add a BMW DME channel in Menu → BMW DME.', 7000);
   setStatus('Connected · ' + tr.name, 'on');
@@ -333,7 +363,8 @@ async function setHeader(c) {
   if (c.fcsh) { await elm.send('ATFCSH' + c.fcsh).catch(() => {}); await elm.send('ATFCSD' + (c.fcsd || '300000')).catch(() => {}); await elm.send('ATFCSM1').catch(() => {}); }
   curHdr = key;
 }
-const STD_HDR = { header: '7DF', cea: '', cra: '' };
+let STD_HDR = { header: '7DF', cea: '', cra: '' };
+let ecus = [];
 const compiled = new Map();
 async function readCustom(c) {
   await setHeader(c);
@@ -377,7 +408,7 @@ async function pollLoop() {
     if (!ct.has('coolant')) slow.push(0x05);
     if (usable(0x33)) slow.push(0x33);
 
-    if (custom.length) await setHeader(STD_HDR);
+    if (custom.length || STD_HDR.cra) await setHeader(STD_HDR);
     for (const p of fast) { if (!running) return; await readPid(p); }
     if (n % 12 === 0) for (const p of slow) { if (!running) return; await readPid(p); }
     if (custom.length) for (const c of custom) { if (!running) return; await readCustom(c); }
@@ -517,9 +548,9 @@ function render() {
   $('#vCool').textContent = fmt(c == null ? null : U.temp(c));
   const cp = c == null ? 0 : Math.max(0, Math.min(100, (c - 20) / (125 - 20) * 100));
   const ce = $('#bCool'); ce.style.width = cp + '%';
-  ce.style.background = c == null ? '' : c >= S.warnCool ? 'var(--bad)' : c < 70 ? 'var(--acc)' : c > 105 ? 'var(--warn)' : 'var(--ok)';
+  ce.style.background = c == null ? '' : c >= S.warnCool ? 'var(--bad)' : c < 70 ? 'var(--acc)' : c >= S.warnCool - 4 ? 'var(--warn)' : 'var(--ok)';
   $('#pCool').textContent = PK.cool > -99 ? fmt(U.temp(PK.cool)) : '--';
-  cls($('#tCool'), c != null && c >= S.warnCool ? 'alarm' : c != null && c > 105 ? 'warn' : '');
+  cls($('#tCool'), c != null && c >= S.warnCool ? 'alarm' : c != null && c >= S.warnCool - 4 ? 'warn' : '');
 
   for (const k of ['1', '2']) {
     const a = sm('wg' + k, V['wg' + k]), cmd = V['wg' + k + 'c'];
