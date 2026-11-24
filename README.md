@@ -17,10 +17,10 @@ warnings (low rail pressure, overheating, overboost), CSV logging, a raw ELM327 
 | Hosting | Any HTTPS URL (Web Bluetooth requires HTTPS). See GitHub Pages below. |
 
 ## Hosting on GitHub Pages
-1. Repo **Settings → Pages → Source: GitHub Actions**.
-2. Push, or run the *Deploy to GitHub Pages* workflow. The URL is shown in the workflow run, typically
-   `https://<user>.github.io/N54_Advanced_Monitor/`.
-3. On the phone, open the URL, then **Add to Home screen**. It runs full-screen and works offline after the first load.
+1. Repo **Settings → Pages → Build and deployment → Source: Deploy from a branch**.
+2. Branch: the branch holding these files, folder **/ (root)** → **Save**.
+3. About a minute later it's live at `https://<user>.github.io/N54_Advanced_Monitor/`.
+4. On the phone, open the URL, then **Install app / Add to Home screen**. It runs full-screen and works offline after the first load.
 
 ## How each value is obtained
 All values come from standard SAE J1979 mode 01 PIDs. When the app connects, it asks the DME which PIDs it
@@ -60,4 +60,4 @@ you drive it hard.
 
 ## Files
 `index.html`, `styles.css`, `app.js` (BLE transport, ELM327 driver, PID decoding, UI, demo simulator),
-`sw.js` + `manifest.webmanifest` (installable/offline), `.github/workflows/pages.yml` (deploy).
+`sw.js` + `manifest.webmanifest` (installable/offline).
